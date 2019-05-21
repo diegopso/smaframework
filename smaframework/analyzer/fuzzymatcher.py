@@ -1,5 +1,6 @@
-import os, json, math, re, gc, base64
+import os, json, math, re, gc, base64, time
 import multiprocessing as mp
+from multiprocessing import Pool, Lock, Manager
 import pandas as pd
 import numpy as np
 from geopy import distance
@@ -9,6 +10,8 @@ from random import randint
 import sklearn
 from sklearn.cluster import DBSCAN, Birch, KMeans
 import smaframework.tool.distribution as Distribution
+import smaframework.common.hashing as Hashing
+import smaframework.analyzer.bucketizer as Bucketizer
 import shapely, shapely.geometry, shapely.ops
 from hdbscan import HDBSCAN
 
@@ -50,7 +53,13 @@ def _persistent_matches_formater(row, layer1, layer2):
 
 def _persistent_matches_load_csv(args):
         path, file, layer1, layer2 = args
-        df = pd.read_csv(os.path.join(path, file), header=0, low_memory=True, dtype={'twitter_uid': str, 'yellow_taxis_uid': str})
+        filename = os.path.join(path, file)
+
+        if os.path.isdir(filename) or not re.compile('%s-%s.*' % (layer1, layer2)).match(file):
+            return pd.DataFrame()
+
+        df = pd.read_csv(open(filename, 'rU'), header=0, low_memory=True)
+
         return df[['%s_uid' % layer1, '%s_uid' % layer2, '%s_lat' % layer1, '%s_lon' % layer1, '%s_timestamp' % layer1, 'score_spatial', 'score_temporal']]
 
 def persistent_matches(key, path, layer1, layer2, **kwargs):
@@ -70,6 +79,14 @@ def persistent_matches(key, path, layer1, layer2, **kwargs):
     df = pd.concat(results)
     if 'verbose' in kwargs.keys() and kwargs['verbose']:
         print("Loaded...", flush=True)
+
+    # df['%s_uid' % layer1] = df.apply(lambda r: str(r['%s_uid' % layer1]), axis=1)
+    # df['%s_uid' % layer2] = df.apply(lambda r: str(r['%s_uid' % layer2]), axis=1)
+
+    if len(df) == 0:
+        if 'verbose' in kwargs.keys() and kwargs['verbose']:
+            print('No matches found!')
+        return
 
     if pd.__version__ >= '0.17.0':
         df.sort_values(by=['%s_uid' % layer1, '%s_uid' % layer2], inplace=True)
@@ -98,6 +115,7 @@ def persistent_matches(key, path, layer1, layer2, **kwargs):
         'beta_score_temporal',
         ]
 
+
     df = df[(df['alpha_%s_uid' % layer1] == df['beta_%s_uid' % layer1]) & (df['alpha_%s_uid' % layer2] == df['beta_%s_uid' % layer2])]
     df = df.drop_duplicates([
         'alpha_%s_lat' % layer1, 
@@ -105,6 +123,13 @@ def persistent_matches(key, path, layer1, layer2, **kwargs):
         'beta_%s_lat' % layer1, 
         'beta_%s_lon' % layer1
         ])
+
+    results = []
+    path = 'data/buckets/'
+    for file in os.listdir(path):
+        filename = os.path.join(path, file)
+        if not os.path.isdir(filename):
+            results.append(pd.read_csv(open(filename, 'rU'), header=0, low_memory=False, memory_map=True, index_col='id'))
 
     if 'verbose' in kwargs.keys() and kwargs['verbose']:
         print("Filtered...", flush=True)
@@ -123,28 +148,82 @@ def persistent_matches(key, path, layer1, layer2, **kwargs):
         max_speed = 0.036 # (1 / 100 Km/h) ~= (1 / 27.8 m/s)
 
     df = df[df['distance'] > min_distance]
-    df = df[df['time_elapsed'] > max_speed * df['distance']] 
+    df = df[df['time_elapsed'] > max_speed * df['distance']]
+
+    if 'verbose' in kwargs.keys() and kwargs['verbose']:
+        print(str(len(df)) + ' persistent matches after filter...')
+
+    frame = pd.concat(results)
+    frame = frame[frame['layer'] == layer1]
+    df = df.merge(frame, left_on='alpha_%s_uid' % layer1, right_on='uid')
+    df = df[(df['timestamp'] < df['alpha_%s_timestamp' % layer1]) & (df['timestamp'] > df['beta_%s_timestamp' % layer1])]
+
+    if 'verbose' in kwargs.keys() and kwargs['verbose']:
+        print(str(len(df)) + ' trace points...')
+
+    df = df[[
+        'alpha_%s_uid' % layer1,
+        'alpha_%s_uid' % layer2,
+        'alpha_%s_lat' % layer1,
+        'alpha_%s_lon' % layer1,
+        'alpha_%s_timestamp' % layer1,
+
+        'lat',
+        'lon',
+        'timestamp',
+
+        'beta_%s_lat' % layer1,
+        'beta_%s_lon' % layer1,
+        'beta_%s_timestamp' % layer1
+    ]]
+
+    df.columns = [
+        '%s_uid' % layer1,
+        '%s_uid' % layer2,
+        'alpha_lat',
+        'alpha_lon',
+        'alpha_timestamp',
+
+        'beta_lat',
+        'beta_lon',
+        'beta_timestamp',
+
+        'omega_lat',
+        'omega_lon',
+        'omega_timestamp'
+    ]
+
+    df['layer'] = 'persistnet-matches-%s-%s' % (layer1, layer2)
+
+    sequences = []
+    for (name, group) in df.groupby(by=['%s_uid' % layer1, 'alpha_timestamp', 'beta_timestamp']):
+        if pd.__version__ >= '0.17.0':
+            df.sort_values(by=['beta_timestamp'], inplace=True)
+        else:
+            df.sort(['beta_timestamp'], inplace=True)
+
+        sequence = group[['beta_lat', 'beta_lon', 'beta_timestamp']]
+        f1 = pd.DataFrame({'beta_lat': [group['alpha_lat'].iloc[0]], 'beta_lon': [group['alpha_lon'].iloc[0]], 'beta_timestamp': [group['alpha_timestamp'].iloc[0]]})
+        f2 = pd.DataFrame({'beta_lat': [group['omega_lat'].iloc[0]], 'beta_lon': [group['omega_lon'].iloc[0]], 'beta_timestamp': [group['omega_timestamp'].iloc[0]]})
+        sequence = pd.concat([f1, sequence, f2]).reset_index(drop=True)
+        sequence.columns = ['lat',   'lng',  'timestamp']
+        sequence['uid'] = group['%s_uid' % layer1].iloc[0]
+        sequence['%s_uid' % layer2] = group['%s_uid' % layer2].iloc[0]
+
+        sequences.append(sequence)
+
+    paths = [frame.to_json() for frame in sequences]
     
-    if pd.__version__ >= '0.17.0':
-        df.sort_values(by=['distance'], inplace=True)
-    else:
-        df.sort(['distance'], inplace=True)
-
-    if 'verbose' in kwargs.keys() and kwargs['verbose']:
-        print("Distance Filter...", flush=True)
-
-    df = df.apply(lambda r: _persistent_matches_formater(r, layer1, layer2), axis=1)
-
-    if 'verbose' in kwargs.keys() and kwargs['verbose']:
-        print("Mapped...", flush=True)
-
-    length = len(df)
+    length = len(paths)
     if length == 0:
         if 'verbose' in kwargs.keys() and kwargs['verbose']:
             print('Empty!')
         return
 
-    result = json.dumps(df.tolist())
+    if 'verbose' in kwargs.keys() and kwargs['verbose']:
+        print("Mapped...", flush=True)
+
+    result = '['+', '.join(paths)+']'
 
     with open('templates/google-polyline.html', 'r') as file:
         template = file.read()
@@ -155,15 +234,23 @@ def persistent_matches(key, path, layer1, layer2, **kwargs):
     else:
         filename = 'persistnet-matches-%d.html' % length
 
+    json.dump(json.loads(result), open('data/results/' + filename.replace('.html', '') + '.json', 'w+'))
+
     with open('data/results/' + filename, 'w+') as outfile:
         outfile.write(template)
 
     if 'verbose' in kwargs.keys() and kwargs['verbose']:
         print("Done!", flush=True)
 
+    return filename
+
 def heatpoint(args):
     filename, layer = args
-    df = pd.read_csv(filename, header=0)
+
+    if os.path.isdir:
+        return ''
+
+    df = pd.read_csv(open(filename, 'rU'), header=0)
 
     spatial = df['score_spatial'].sum()
     temporal = df['score_temporal'].sum()
@@ -243,14 +330,17 @@ def analyse_cube(args):
     try:
         layer, latb, lonb, timestampb = file.replace('.csv', '').split('-')
     except Exception as e:
-        return None
+        return {
+            'comparisons': 0,
+            'matches': 0
+        }
     
     latb = int(latb)
     lonb = int(lonb)
     timestampb = int(timestampb)
     
     # load cube for layer1
-    layer1 = pd.read_csv(filename, header=0, low_memory=False, memory_map=True, index_col='id')
+    layer1 = pd.read_csv(open(filename, 'rU'), header=0, low_memory=False, memory_map=True, index_col='id')
 
     # load cubes for layer2
     dfs = []
@@ -261,11 +351,14 @@ def analyse_cube(args):
                 if not os.path.isfile(f):
                     continue
 
-                dfs.append(pd.read_csv(f, header=0, low_memory=False, memory_map=True, index_col='id'))
+                dfs.append(pd.read_csv(open(f, 'rU'), header=0, low_memory=False, memory_map=True, index_col='id'))
 
     if len(dfs) == 0:
         # print('File %s analysed with no matching bucket...' % file)
-        return None
+        return {
+            'comparisons': 0,
+            'matches': 0
+        }
 
     layer2 = pd.concat(dfs)
 
@@ -279,7 +372,10 @@ def analyse_cube(args):
 
     if len(ss) == 0:
         # print('File %s analysed with no matching distances...' % file)
-        return None
+        return {
+            'comparisons': len(layer1) * len(layer2),
+            'matches': 0
+        }
 
     spatial_scores = pd.DataFrame(ss, columns=['source', 'target', l1 + '_uid', l1 + '_lat', l1 + '_lon', l1 + '_timestamp', l2 + '_uid', l2 + '_lat', l2 + '_lon', l2 + '_timestamp', 'score'])
     
@@ -293,7 +389,10 @@ def analyse_cube(args):
 
     if len(ts) == 0:
         # print('File %s analysed with no matching times...' % file)
-        return None
+        return {
+            'comparisons': len(layer1) * len(layer2),
+            'matches': 0
+        }
 
     temporal_scores = pd.DataFrame(ts, columns=['source', 'target', l1 + '_uid', l1 + '_lat', l1 + '_lon', l1 + '_timestamp', l2 + '_uid', l2 + '_lat', l2 + '_lon', l2 + '_timestamp', 'score'])
 
@@ -312,28 +411,44 @@ def analyse_cube(args):
     if len(df.index):
         df.to_csv('data/fuzzy-matches/%s-%s-%s.csv' % (l1, l2, IdGenerator.uuid4().hex), index=False)
 
+    return {
+        'comparisons': len(layer1) * len(layer2),
+        'matches': len(df)
+    }
+
 def analyze(path, distance_precision, temporal_precision, l1, l2, **kwargs):
     multiprocess = 'pool_size' in kwargs.keys() and int(kwargs['pool_size']) > 1
+
+    results = []
     if multiprocess:
         pool_size = int(kwargs['pool_size'])
         pool = mp.Pool(pool_size)
-        pool.map(analyse_cube, [(path, file, l1, l2, distance_precision, temporal_precision, kwargs) for file in os.listdir(path) if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file)])
+        results = pool.map(analyse_cube, [(path, file, l1, l2, distance_precision, temporal_precision, kwargs) for file in os.listdir(path) if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file)])
         pool.close()
         pool.join()
     else:
         for file in os.listdir(path):
             if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file):
-                analyse_cube((path, file, l1, l2, distance_precision, temporal_precision, kwargs))
+                result = analyse_cube((path, file, l1, l2, distance_precision, temporal_precision, kwargs))
+                results.append(result)
+
+    totalizer = {'comparisons': 0, 'matches': 0}
+    for r in results:
+        totalizer['comparisons'] = totalizer['comparisons'] + r['comparisons']
+        totalizer['matches'] = totalizer['matches'] + r['matches']
+
+    return totalizer
 
 def load_matches_csv(args):
     path, file, counts = args
-    df = pd.read_csv(os.path.join(path, file), header=0, low_memory=False, memory_map=True)
+    df = pd.read_csv(open(os.path.join(path, file), 'rU'), header=0, low_memory=False, memory_map=True)
     counts.append(df.shape[0])
     return df
 
 def clusterer(path, layer, epss, epst, **kwargs):
     # evaluate min_samples for clustering
     min_samples = 20 if 'min_samples' not in kwargs.keys() else kwargs['min_samples']
+    plot_precision = 0.5 if 'plot_precision' not in kwargs.keys() else kwargs['plot_precision']
 
     # metric = 'seuclidean' if 'metric' not in kwargs.keys() else kwargs['metric']
     # metric_params = None if 'metric_params' not in kwargs.keys() else kwargs['metric_params']
@@ -387,27 +502,50 @@ def clusterer(path, layer, epss, epst, **kwargs):
     # frame['lon'] = (frame['lon'] - min_lon) * epst / epss
     # eps = epst
 
-    ### cluster data and separate in frame
-    clusterer = None
-    fname = 'data/results/hdbscan%s.csv' % cluster_hash
-    if os.path.isfile(fname):
-        print('INFO: loading clusters')
-        frame = pd.read_csv(fname)
-    else:
-        print('INFO: running ST-HDBSCAN')
-        clusterer = HDBSCAN(min_samples=min_samples).fit(frame[['lat', 'lon', 'timestamp']].as_matrix())
-        frame = pd.concat([frame, pd.DataFrame({'label': clusterer.labels_})], axis=1)
-        frame = frame[frame['label'] != -1]
-        frame.to_csv(fname)
-
-    fname = 'data/results/kmeans%s.csv' % cluster_hash
+    fname = 'data/results/kmeans%s-1.csv' % cluster_hash
     if os.path.isfile(fname):
         print('INFO: loading plot data')
         
-        frame = pd.read_csv(fname)
+        frame = pd.read_csv(open(fname, 'rU'))
+    else:
+        print('INFO: running KMEANS for paralelization')
+        n_clusters = int(kwargs['pool_size'])
+        clusterer = KMeans(n_clusters=n_clusters, n_jobs=n_clusters).fit(frame[['lat', 'lon']].as_matrix())
+
+        frame = pd.concat([frame, pd.DataFrame({'label': clusterer.labels_})], axis=1)
+        frame.to_csv(fname)
+    
+    print('INFO: running ST-HDBSCAN')
+
+    i = 0
+    gframe = frame.groupby('label')
+    frame_list = []
+    fname = 'data/results/hdbscan%s.csv' % cluster_hash
+    for (group, df) in gframe:
+        clusterer = HDBSCAN(min_samples=min_samples, core_dist_n_jobs=int(kwargs['pool_size'])).fit(df[['lat', 'lon', 'timestamp']].as_matrix())
+
+        df = df.drop('label', axis=1)
+        df['label'] = pd.Series(clusterer.labels_, index=df.index)
+        df = df[df['label'] != -1]
+
+        i = i + 1
+        df['label'].apply(lambda x: str(i) + '-' + str(x))
+
+        frame_list.append(df)
+
+    frame = pd.concat(frame_list, ignore_index=True)
+
+    groups = len(frame.groupby('label'))
+    frame.drop('label', axis=1, inplace=True)
+
+    fname = 'data/results/kmeans%s-2.csv' % cluster_hash
+    if os.path.isfile(fname):
+        print('INFO: loading plot data')
+        
+        frame = pd.read_csv(open(fname, 'rU'))
     else:
         print('INFO: running KMEANS for ploting')
-        n_clusters = int((frame['label'].max() - 1) * 0.1)
+        n_clusters = int((groups - 1) * plot_precision)
         clusterer = KMeans(n_clusters=n_clusters, n_jobs=int(kwargs['pool_size'])).fit(frame[['lat', 'lon']].as_matrix())
 
         frame = pd.concat([frame, pd.DataFrame({'label': clusterer.labels_})], axis=1)
@@ -442,13 +580,13 @@ def get_zones(key, path, layer, epss, epst, **kwargs):
     regex = re.compile('^(\d+)%s.csv$' % cluster_hash)
     if 'pool_size' in kwargs.keys() and int(kwargs['pool_size']) > 1:
         pool = mp.Pool(int(kwargs['pool_size']))
-        result = pool.map(Distribution.get_region, [pd.read_csv(cluster_dir + filename) for filename in os.listdir(cluster_dir) if regex.match(filename)])
+        result = pool.map(Distribution.get_region, [pd.read_csv(open(cluster_dir + filename, 'rU')) for filename in os.listdir(cluster_dir) if regex.match(filename)])
         pool.close()
         pool.join()
     else:
         for filename in os.listdir(cluster_dir):
             if regex.match(filename): 
-                result.append(Distribution.get_region(pd.read_csv(cluster_dir + filename)))
+                result.append(Distribution.get_region(pd.read_csv(open(cluster_dir + filename, 'rU'))))
 
     # create json for ploting on Google Maps
     print('INFO: creating plot object')
@@ -476,3 +614,149 @@ def get_zones(key, path, layer, epss, epst, **kwargs):
         file.write(template)
 
     print(results_dir + filename)
+
+def quantify_connected_components(key, path, layer, origin, distance_precision, time_precision, confidence=2, **kwargs):
+    # load data
+    result = []
+    counts = []
+    if 'pool_size' in kwargs.keys() and int(kwargs['pool_size']) > 1:
+        pool = mp.Pool(int(kwargs['pool_size']))
+        counts = mp.Manager().list()
+        result = pool.map(load_matches_csv, [(path, file, counts) for file in os.listdir(path) if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file)])
+        pool.close()
+        pool.join()
+    else:
+        kwargs['pool_size'] = 1
+        for file in os.listdir(path):
+            if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file):
+                result.append(load_matches_csv((path, file, counts)))
+    
+    frame = pd.concat(list(result))
+    frame.reset_index(inplace=True)
+    frame = frame[[layer + '_lat', layer + '_lon',  layer + '_timestamp', 'score_spatial', 'score_temporal']]
+    frame.columns = ['lat', 'lon', 'timestamp', 'score_spatial', 'score_temporal']
+
+    frame = Bucketizer.bucketize_dataframe(frame, origin, distance_precision, time_precision)
+
+    frame = frame.groupby(by=['lat_bucket', 'lon_bucket']).agg({
+        'timestamp': 'count',
+        'lat': 'mean',
+        'lon': 'mean',
+        'score_spatial': 'mean', 
+        'score_temporal': 'mean',
+        })
+
+    frame = frame.rename(columns={'timestamp': 'count'})
+
+    frame['mark'] = frame['count'] > (frame['count'].mean() + confidence * frame['count'].std())
+    frame = frame[frame['mark']]
+    frame['label'] = 0
+
+    lock = Lock()
+    p = Pool(kwargs['pool_size'], initargs=(lock,), initializer=init_child)
+    mgr = Manager()
+    ns = mgr.Namespace()
+    
+    ns.frame = frame
+
+    args = [ns] * kwargs['pool_size']
+    p.map_async(connected_compenents_labeling, args)
+
+    p.close()
+    p.join()
+
+    fname = 'regions-fuzzymatcher-l%s-tp%d-dp%d-c%d' % (layer, time_precision, distance_precision, confidence)
+    if 'filename' in kwargs.keys():
+        fname = kwargs['filename']
+
+    frame = ns.frame.copy()
+    frame.to_csv('data/results/%s.csv' % fname)
+    frame = frame[frame['label'] != 0]
+    frame = frame.groupby(by='label')
+
+    # get metadata about clusters
+    totalizer = frame[['score_spatial', 'score_temporal']].mean()
+    totalizer['count'] = frame['count'].sum()
+    totalizer = '{"score_spatial": '+totalizer['score_spatial'].map(str)+', "score_temporal": '+totalizer['score_temporal'].map(str)+', "count": '+totalizer['count'].map(str)+'}'
+    totalizer = totalizer.str.cat(sep=',')
+
+    with open('data/results/%s-totalizer.json' % fname, 'w+') as file:
+        file.write('[' + totalizer + ']')
+
+    # draw regions
+    result = []
+    if 'pool_size' in kwargs.keys() and int(kwargs['pool_size']) > 1:
+        pool = mp.Pool(int(kwargs['pool_size']))
+        result = pool.map(Distribution.get_region, [gdf for (name, gdf) in frame])
+        pool.close()
+        pool.join()
+    else:
+        for (name, gdf) in frame:
+            result.append(Distribution.get_region(gdf))
+
+    # create json for ploting on Google Maps
+    print('INFO: creating plot object')
+    regions = ''
+    for region in result:
+        df = '{"lat": '+ region['lat'].map(str) +', "lng": '+ region['lon'].map(str) +'}'
+        json = '[' + df.str.cat(sep=',') + ']'
+        regions = regions + json + ','
+
+    # create HTML file with plot and finish
+    with open('templates/google-shape.html', 'r') as file:
+        template = file.read()
+
+    template = template.replace('<?=LIST?>', regions).replace('<?=KEY?>', key).replace('<?=DATA?>', totalizer)
+
+    results_dir = 'data/results/'
+    with open(results_dir + fname + '.html', 'w+') as file:
+        file.write(template)
+
+    return results_dir + fname
+
+def connected_compenents_labeling(ns, timeout=600):
+    while True:
+        label = randint(0, 2**32 - 1)
+        rows = ns.frame[ns.frame['label'] == 0]
+
+        if len(rows) == 0:
+            break
+
+        origin = rows.sample(n=1, random_state=label)
+        boundaries = [origin]
+
+        region = []
+        while len(boundaries) > 0:
+            element = boundaries.pop(0)
+
+            lat_bucket = element.reset_index()['lat_bucket'][0]
+            lon_bucket = element.reset_index()['lon_bucket'][0]
+
+            for i in range(lat_bucket - 1, lat_bucket + 2):
+                for j in range(lon_bucket - 1, lon_bucket + 2):
+                    if (i, j) in region:
+                        continue
+
+                    if (i, j) not in ns.frame.index:
+                        continue
+                    
+                    gdf = ns.frame.xs(i, level='lat_bucket', drop_level=False).xs(j, level='lon_bucket', drop_level=False)
+                    if gdf.at[(i,j), 'mark']:
+                        boundaries.append(gdf)
+                        region.append((i, j))
+
+        lock.acquire()
+        
+        df = ns.frame
+        for point in region:
+            df.at[(point[0], point[1]), 'label'] = int(label)
+
+        df.replace('', np.nan, inplace=True)
+        df.dropna(inplace=True)        
+        ns.frame = df
+
+        lock.release()
+
+def init_child(lock_):
+    global lock
+    lock = lock_

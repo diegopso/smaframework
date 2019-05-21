@@ -45,14 +45,22 @@
 
       function initMap() {
         infowindow = new google.maps.InfoWindow();
-        map = new google.maps.Map(document.getElementById('map'), {
-          zoom: 12,
-          center: {lat: 40.745330, lng: -73.940273},
-          mapTypeId: 'satellite'
-        });
 
         // Define the LatLng coordinates for the polygon's path.
         var flows = <?=FLOWS?>;
+
+        var lat = 0;
+        var lng = 0;
+        for (var i = flows.length - 1; i >= 0; i--) {
+          lat += flows[i].origin_centroid.lat;
+          lng += flows[i].origin_centroid.lng;
+        }
+
+        map = new google.maps.Map(document.getElementById('map'), {
+          zoom: 12,
+          center: {lat: lat / flows.length, lng: lng / flows.length},
+          mapTypeId: 'satellite'
+        });
 
         var max_wheight = 0;
         for (var i = flows.length - 1; i >= 0; i--) {
@@ -74,33 +82,54 @@
 
           weight = (weight - thershold) / (1-thershold) * 0.75 + 0.25;
 
-          var polygon;
+          var polygon1, polygon2;
 
-          if (!drawn_origins.includes(flow.origin_region_id)) {
-            polygon = new google.maps.Polygon({
-              paths: flow.origin_region,
-              strokeColor: '#FF0000',
-              strokeOpacity: 0.8,
-              strokeWeight: 2,
-              fillColor: '#FF0000',
-              fillOpacity: 0.35
-            });
+          try {
+            if (!drawn_origins.includes(flow.origin_region_id)) {
+              polygon1 = new google.maps.Polygon({
+                paths: flow.origin_region,
+                strokeColor: '#FF0000',
+                strokeOpacity: 0.8,
+                strokeWeight: 2,
+                fillColor: '#FF0000',
+                fillOpacity: 0.35
+              });
+            }
 
-            polygon.setMap(map);
+
+            if (!drawn_destinations.includes(flow.destination_region_id)) {
+              polygon2 = new google.maps.Polygon({
+                paths: flow.destination_region,
+                strokeColor: '#8CAAE6',
+                strokeOpacity: 0.8,
+                strokeWeight: 2,
+                fillColor: '#8CAAE6',
+                fillOpacity: 0.35
+              });
+            }
+
+          } catch (err) {
+            console.log(flow);
+            return false;
           }
 
+          if (polygon1)
+            polygon1.setMap(map);
+          if (polygon2)
+            polygon2.setMap(map);
 
-          if (!drawn_destinations.includes(flow.destination_region_id)) {
-            polygon = new google.maps.Polygon({
-              paths: flow.destination_region,
-              strokeColor: '#8CAAE6',
-              strokeOpacity: 0.8,
-              strokeWeight: 2,
-              fillColor: '#8CAAE6',
-              fillOpacity: 0.35
-            });
+          if (flow.destination_region_id == flow.origin_region_id) {
+            var ds = 0.0025;
+            var link = [];
+            var step = Math.PI/16;
+            
+            for (var theta = Math.PI/2; theta <= Math.PI/2 + 2*Math.PI + step; theta += step) {
+              x = ds * Math.cos(theta) + flow.link[0]['lat'];
+              y = ds * Math.sin(theta) + flow.link[0]['lng'] - ds;
+              link.push({'lat': x, 'lng': y});
+            }
 
-            polygon.setMap(map);
+            flow.link = link;
           }
 
           var trace = new google.maps.Polyline({
@@ -112,7 +141,7 @@
             geodesic: true,
             strokeColor: '#7D3C98',
             strokeOpacity: weight,
-            strokeWeight: 3
+            strokeWeight: 2
           });
 
           trace.setMap(map);

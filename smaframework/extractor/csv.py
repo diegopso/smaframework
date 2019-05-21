@@ -6,6 +6,17 @@ import time
 import datetime as dt
 import uuid as IdGenerator
 
+'''
+ * Extract the contents of a single file.
+ * 
+ * @param args - dictionary containing extraction paramas.
+ *     file - file source.
+ *     source - source directory.
+ *     dest - destination directory.
+ *     nodes - wich colums will be taken to form a node, if more than one node by row, speify a list.
+ *     layer - layer to be settled to all examples.
+ *     config - boundary and timeformat params dict (e.g., datetime_format, max_lat, min_lat, max_lon, min_lon, max_timestamp, min_timestamp).
+'''
 def extract_file(args):
     file, source, dest, nodes, layer, config = args
     filename = os.path.join(source, file)
@@ -52,6 +63,15 @@ def extract_file(args):
         os.makedirs(dest)
     df.to_csv(os.path.join(dest, file), index=False)
 
+'''
+ * Extract the contents of a directory.
+ * 
+ * @param source source directory.
+ * @param dest destination directory.
+ * @param layer layer to be settled to all examples.
+ * @param nodes wich colums will be taken to form a node, if more than one node by row, speify a list.
+ * @param **kwargs dictionary containing extraction paramas (e.g., pool_size, file_regex, datetime_format, max_lat, min_lat, max_lon, min_lon, max_timestamp, min_timestamp).
+'''
 def extract(source, dest, layer, nodes, **kwargs):
     multiprocess = 'pool_size' in kwargs.keys() and int(kwargs['pool_size']) > 1
     filelist = os.listdir(source)

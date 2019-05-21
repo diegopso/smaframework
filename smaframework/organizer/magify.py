@@ -15,6 +15,9 @@ def organize_file(filename, edge_type, config):
     if not os.path.exists(edges_location):
         os.makedirs(edges_location)
 
+    if os.path.isdir(filename):
+        return False
+
     # read checkpoints
     df = pd.read_csv(filename, header=0)
 

@@ -1,13 +1,16 @@
 import smaframework.analyzer.bucketwalk.memory as BucketWalk
 from pyproj import Proj, transform
 from haversine import haversine
+from shapely.geometry import shape
 import fiona, os, re
 import uuid as IdGenerator
 import pandas as pd
 import numpy as np
 import multiprocessing as mp
-import json
 
+'''
+ *
+'''
 def get_route(params):
     feature, stops, inProj, outProj, kwargs = params
     error = 0.05
@@ -112,3 +115,34 @@ def transit_routes(routes_filepath, stops_filepath, layer, inproj='epsg:2263', o
 
     return routes
 
+def get_zones(filepath, inproj='epsg:2263', outproj='epsg:4326'):
+    inProj = Proj(init=inproj, preserve_units = True)
+    outProj = Proj(init=outproj)
+
+    results = {}
+    for feature in fiona.open(filepath):
+        data = {}
+        for (k, v) in feature['properties'].items():
+            data[k] = v
+
+        centroid = shape(feature['geometry']).representative_point()
+        centroid = list(centroid.coords)[0]
+        centroid = list(reversed(transform(inProj, outProj, centroid[0], centroid[1])))
+
+        region = []
+        for point in feature['geometry']['coordinates'][0]:
+            point = list(reversed(transform(inProj, outProj, point[0], point[1])))
+            region.append(point)
+
+        data['region'] = region
+        data['centroid'] = {
+            'lat': centroid[0],
+            'lng': centroid[1]
+        }
+
+        
+        results[data['LocationID']] = data
+        if data['LocationID'] != data['OBJECTID']:
+            results[data['OBJECTID']] = data
+
+    return results

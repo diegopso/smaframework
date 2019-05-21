@@ -74,41 +74,46 @@
         ];
 
         for (var i = traces.length - 1; i >= 0; i--) {
+          var t = [];
+
+          traces[i].lat = Object.values(traces[i].lat);
+          traces[i].lng = Object.values(traces[i].lng);
+          traces[i].timestamp = Object.values(traces[i].timestamp);
+          traces[i].uid = Object.values(traces[i].uid);
+
+          for (var j = traces[i].timestamp.length - 1; j >= 0; j--) {
+            t.push({
+              lat: traces[i].lat[j],
+              lng: traces[i].lng[j],
+              timestamp: traces[i].timestamp[j],
+              uid: traces[i].uid[j].toString()
+            });
+
+            var marker = new google.maps.Marker({
+              position: {lat: traces[i].lat[j], lng:traces[i].lng[j]},
+              map: map,
+              icon: {
+                url: '../../templates/img/' + icons[traces[i].uid[j].toString().hashCode() % icons.length],
+                // size: new google.maps.Size(20, 32),
+                // origin: new google.maps.Point(0, 0),
+                // anchor: new google.maps.Point(0, 32)
+              },
+              shape: shape,
+              title: traces[i].uid[j].toString()
+            });
+
+            marker.setMap(map);
+          }
+
           var trace = new google.maps.Polyline({
-            path: traces[i],
+            path: t,
             geodesic: true,
-            strokeColor: colors[Math.round(traces[i][0].timestamp / 60 / 60) % colors.length],
+            strokeColor: colors[Math.round(traces[i].timestamp[0] / 60 / 60) % colors.length],
             strokeOpacity: 1.0,
             strokeWeight: 2
           });
 
           trace.setMap(map);
-
-          var marker = new google.maps.Marker({
-            position: {lat: traces[i][0].lat, lng:traces[i][0].lng},
-            map: map,
-            icon: {
-              url: '../../templates/img/' + icons[traces[i][0].twitter_uid.hashCode() % icons.length],
-              // size: new google.maps.Size(20, 32),
-              // origin: new google.maps.Point(0, 0),
-              // anchor: new google.maps.Point(0, 32)
-            },
-            shape: shape,
-            title: traces[i][0].twitter_uid
-          });
-
-          var marker = new google.maps.Marker({
-            position: {lat: traces[i][1].lat, lng:traces[i][1].lng},
-            map: map,
-            icon: {
-              url: '../../templates/img/' + icons[traces[i][0].twitter_uid.hashCode() % icons.length],
-              // size: new google.maps.Size(20, 32),
-              // origin: new google.maps.Point(0, 0),
-              // anchor: new google.maps.Point(0, 32)
-            },
-            shape: shape,
-            title: traces[i][1].twitter_uid
-          });
         }
       }
     </script>

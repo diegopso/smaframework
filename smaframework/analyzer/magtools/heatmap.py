@@ -54,5 +54,8 @@ def layer(layer, key, path, **kwargs):
     else:
         filename = 'heatmap-%s.html' % layer
 
+    if not os.path.exists('data/results/'):
+        os.makedirs('data/results/')
+
     with open('data/results/' + filename, 'w+') as file:
         file.write(template)

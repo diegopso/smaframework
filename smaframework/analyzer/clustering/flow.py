@@ -5,6 +5,10 @@ from hdbscan import HDBSCAN
 import pandas as pd
 import numpy as np
 import sklearn, json
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
+from scipy.signal import argrelextrema
+import os
 
 def cluster_hdbscan(filename, origin_columns, destination_columns, **kwargs):
     frame = pd.read_csv(filename, header=0, low_memory=True)
@@ -15,6 +19,7 @@ def cluster_hdbscan(filename, origin_columns, destination_columns, **kwargs):
 
     frame = clusterize_hdbscan(frame, origin_columns, destination_columns, min_size, pool_size)
 
+    frame.to_csv(output_file + '.csv')
     return summarize_data(frame, gmaps_key, output_file, origin_columns, destination_columns)
 
 def cluster(filename, origin_columns, destination_columns, **kwargs):
@@ -38,15 +43,67 @@ def cluster(filename, origin_columns, destination_columns, **kwargs):
 
     frame = clusterize(frame, eps_origin, eps_destination, min_samples, origin_columns, destination_columns, nnalgorithm, pool_size)
 
+    frame.to_csv(output_file + '.csv')
     return summarize_data(frame, gmaps_key, output_file, origin_columns, destination_columns, {
             'min_samples': float(min_samples),
             'eps_origin': float(eps_origin),
             'eps_destination': float(eps_destination)
             })
 
-def summarize_data(frame, gmaps_key, output_file, origin_columns, destination_columns, metadata={}):
-    frame.to_csv(output_file + '.csv')
+'''
+ * Plot the main flows of a dataset with predefined departure and arrival regions represented by labels.
+ *
+ * @param frama The data, with the mandatory columns: 'labels_origin', 'labels_destination', and 'flow' ('flow' may be an empty column).
+ * @param regions List containing regions and centroids for every label in the labeled data.
+ * @param gmaps_key Key used to access Google Maps API.
+ * @param output_file Output file location. 
+ * @return None
+'''
+def plot_flows(frame, regions, gmaps_key, output_file, metadata={}):
+    frame = frame.groupby(['labels_origin', 'labels_destination']).count().sort_values(by='flow').reset_index()
 
+    flow_threshold = select_knee(frame['flow'].values, output_file)
+    frame = frame[frame['flow'] > flow_threshold]
+
+    flows = []
+    for (index, row) in frame.iterrows():
+        if row['labels_origin'] not in regions.keys() or row['labels_destination'] not in regions.keys():
+            continue
+
+        origin_region = [{'lat': point[0], 'lng': point[1]} for point in regions[row['labels_origin']]['region']]    
+        destination_region = [{'lat': point[0], 'lng': point[1]} for point in regions[row['labels_destination']]['region']]
+
+        flow = {
+            'weight': int(row['flow']),
+            'origin_region_id': int(row['labels_origin']),
+            'destination_region_id': int(row['labels_destination']),
+            'origin_centroid': regions[row['labels_origin']]['centroid'],
+            'destination_centroid': regions[row['labels_destination']]['centroid'],
+            'origin_region': origin_region,
+            'destination_region': destination_region,
+            'link': [regions[row['labels_origin']]['centroid'], regions[row['labels_destination']]['centroid']]
+        }
+
+        flows.append(flow)
+
+    with open('templates/google-flow.html', 'r') as file:
+        template = file.read()
+    
+    template = template.replace('<?=FLOWS?>', json.dumps(flows)).replace('<?=KEY?>', gmaps_key)
+    
+    with open(output_file + '.html', 'w+') as outfile:
+        outfile.write(template)
+
+    with open(output_file + '.json', 'w+') as outfile:
+        json.dump(flows, outfile)
+
+    metadata['flow_threshold'] = float(flow_threshold)
+    with open(output_file + '.metadata.json', 'w+') as outfile:
+        json.dump(metadata, outfile)
+
+    return frame
+
+def summarize_data(frame, gmaps_key, output_file, origin_columns, destination_columns, metadata={}):
     origin_frame = frame.groupby('labels_origin')
     destination_frame = frame.groupby('labels_destination')
     flow_frame = frame.groupby(['labels_origin', 'labels_destination'])
@@ -104,17 +161,14 @@ def summarize_data(frame, gmaps_key, output_file, origin_columns, destination_co
 
     frame = pd.DataFrame(result)
 
-    if pd.__version__ >= '0.17.0':
-        flow_thershold = select_knee(frame['flow'].sort_values().as_matrix())
-    else:
-        flow_thershold = select_knee(frame['flow'].sort().as_matrix())
+    flow_threshold = select_knee(frame['flow'].values)
 
-    print('INFO: flow_thershold=%f for file=%s' % (flow_thershold, output_file))
+    print('INFO: flow_threshold=%f for file=%s' % (flow_threshold, output_file))
 
-    frame = frame[frame['flow'] > flow_thershold]
+    frame = frame[frame['flow'] > flow_threshold]
 
     if gmaps_key:
-        flows = list(filter(lambda flow: flow['weight'] >= flow_thershold, flows))
+        flows = list(filter(lambda flow: flow['weight'] >= flow_threshold, flows))
 
         with open('templates/google-flow.html', 'r') as file:
             template = file.read()
@@ -127,7 +181,7 @@ def summarize_data(frame, gmaps_key, output_file, origin_columns, destination_co
         with open(output_file + '.json', 'w+') as outfile:
             json.dump(flows, outfile)
 
-    metadata['flow_thershold'] = float(flow_thershold)
+    metadata['flow_threshold'] = float(flow_threshold)
     with open(output_file + '.metadata.json', 'w+') as outfile:
         json.dump(metadata, outfile)
 
@@ -140,23 +194,78 @@ def get_region(df, columns):
     df = '{"lat": '+ df['lat'].map(str) +', "lng": '+ df['lon'].map(str) +', "teta": '+ df['teta'].map(str) +'}'
     return '[' + df.str.cat(sep=',') + ']'
 
-# from: https://www.quora.com/What-is-the-mathematical-characterization-of-a-%E2%80%9Cknee%E2%80%9D-in-a-curve
-def select_knee(y):
+def _interpolate(y, interpolator='polynomial'):
+    if interpolator == 'polynomial':
+        # smooth data to polynomial curve
+        N = len(y)
+        x = np.linspace(0, 1, N)
+
+        polynomial_features= PolynomialFeatures(degree=13)
+        x = polynomial_features.fit_transform(x.reshape(-1, 1))
+
+        model = LinearRegression()
+        model.fit(x, y)
+        ys = model.predict(x)
+    elif interpolator == 'exponential':
+        # smooth data to inverse curve: y = alpha / x^beta
+        N = len(y)
+        x0 = 0
+        x1 = int(.05 * N)
+        y0 = y[x0]
+        y1 = y[x1]
+        alpha = np.log(y1/y0) / x1
+
+        x = np.linspace(0, N, N)
+        ys = y0 * np.exp(x * alpha)
+    else:
+        ys = y
+
+    return ys
+
+def select_knee(y, plot2=False, interpolator='polynomial'):
     try:
-        dy = np.gradient(y)
+        # sort data
+        y.sort()
+        y = y[::-1]
+
+        # cap
+        if len(y) > 2500:
+            y = y[0:2500]
+
+        # smoothen curvature
+        ys = _interpolate(y, interpolator)
+
+        # evaluate curvature equation
+        dy = np.gradient(ys)
         ddy = np.gradient(dy)
-        
-        x = np.arange(len(y))
-        dx = np.gradient(x)
-        ddx = np.gradient(dx)
+        k = np.absolute(ddy) / np.power(1+dy*dy, 3/2)
 
-        k = np.absolute(dx*ddy-dy*ddx) / np.power(dx*dx+dy*dy, 3/2)
-        dk = np.gradient(k)
+        # evaluate local maxima
+        local_maxima = argrelextrema(k, np.greater)
 
-        return y[np.argmin(dk)]
+        if plot2:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            plt.clf()
+
+            plt.plot(y)
+            plt.plot(ys)
+            
+            plt.plot(k * np.amax(y) / np.amax(k)) # scaled
+            plt.axvline(x=local_maxima[0][0], color='r', linestyle='--')
+
+            plt.legend(['Original', 'Smoothed', 'Curvature', 'Selected'])
+            plt.xlabel('Sorted Flow Index')
+            plt.ylabel('Flow Magnitude')
+
+            plt.savefig('%s-%d-%d.png' % (plot2, local_maxima[0][0], y[local_maxima[0][0]]))
+
+        # use first local maximum as knee
+        return y[local_maxima[0][0]]
     except Exception as e:
-        print(len(y))
-        return y[int(len(y) / 2)]
+        print(e)
+        return y[int(len(y) / 10)]
 
 def clusterize_hdbscan(frame, origin_columns, destination_columns, min_size, pool_size=1):
     print('INFO: running HDBSCAN')

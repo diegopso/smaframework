@@ -14,10 +14,25 @@ import pandas as pd
 
 def map(df, callback, *args, **kwargs):
     if 'pool_size' not in kwargs.keys():
-        kwargs['pool_size'] = 1
+        kwargs['pool_size'] = 2
+
+    if kwargs['pool_size'] == 1:
+    	return callback((df, args, kwargs))
 
     chunksize = len(df) / kwargs['pool_size']
     groups = df.groupby(np.arange(len(df)) // chunksize)
     with mp.Pool() as pool:
         result = pool.map(callback, [(df, args, kwargs) for g, df in groups])
         return pd.concat(result, axis=0)
+
+def maplist(df, callback, *args, **kwargs):
+    if 'pool_size' not in kwargs.keys():
+        kwargs['pool_size'] = 2
+
+    if kwargs['pool_size'] == 1:
+    	return callback((df, args, kwargs))
+
+    chunksize = len(df) / kwargs['pool_size']
+    groups = df.groupby(np.arange(len(df)) // chunksize)
+    with mp.Pool() as pool:
+        return pool.map(callback, [(df, args, kwargs) for g, df in groups])

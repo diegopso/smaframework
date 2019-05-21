@@ -17,20 +17,21 @@ def histogram(path, layers, show=True, max_x=None, save_log=True, **kwargs):
     for layer in layers:
         if 'pool_size' in kwargs.keys() and int(kwargs['pool_size']) > 1:
             pool = mp.Pool(int(kwargs['pool_size']))
-            result = pool.map(load_csv, [(path, file, layer) for file in os.listdir(path) if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file)])
+            result = pool.map(load_csv, [(path, file) for file in os.listdir(path) if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file)])
             pool.close()
             pool.join()
         else:
             result = []
             for file in os.listdir(path):
                 if 'file_regex' not in kwargs.keys() or kwargs['file_regex'].match(file):
-                    result.append(load_csv((path, file, layer)))
+                    result.append(load_csv((path, file)))
 
         if len(result) == 0:
             print('Layer %s empty!' % layer)
             continue
 
         frame = pd.concat(list(result))
+        frame = frame[frame['layer'] == layer]
 
         if len(frame) == 0:
             print('Layer %s empty!' % layer)

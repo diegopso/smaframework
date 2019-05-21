@@ -2,6 +2,10 @@ import urllib, json, uuid, os, datetime, time, logging, random, math, traceback
 import pandas as pd
 from shapely.geometry import Point
 
+def get(lat, lon, appid, version='2.5'):
+    content = urllib.request.urlopen("http://api.openweathermap.org/data/%s/weather?lat=%f&lon=%f&appid=%s" % (version, lat, lon, appid)).read().decode('utf-8')
+    return json.loads(content)
+
 def extract(access, region, layer='openweathermap', **kwargs):
     if 'samples' not in kwargs.keys():
         kwargs['samples'] = 3

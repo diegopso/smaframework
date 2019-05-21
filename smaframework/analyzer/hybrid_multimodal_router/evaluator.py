@@ -47,23 +47,24 @@ def evaluate(trips, routes, group_id, profile=1):
 
     return pd.concat(frames, ignore_index=True)
 
-'''
-    TAXI - only TAXI
-    TRANSIT - no TAXI
-    HYBRID - has TAXI and OTHER
-    WALKING - only WALKING
-'''
 def select_category(modes):
     modes = list(set(modes))
 
-    if len(modes) == 1:
-        if modes[0] == 'uberX':
-            return 'TAXI'
-        elif modes[0] == 'WALKING':
-            return 'WALKING'
+    if len(modes) > 1:
+        if 'taxi' in modes or 'uberx' in modes:
+            return 'HYBRID'
+
+        if 'bicycle' in modes and 'transit' in modes:
+            return 'HYBRID'
+
+        if 'bicycle' in modes:
+            return 'BICYCLE'
+
         return 'TRANSIT'
 
-    return 'HYBRID' if 'uberX' in modes else 'TRANSIT'
+    if modes[0] in ['uberx', 'taxi']:
+        return 'TAXI'
+    return modes[0].upper()
 
 def extract_metadata(option):
     traversed_distance = 0
@@ -80,20 +81,20 @@ def extract_metadata(option):
         duration = duration + abs(step['duration'])
         cost = cost + abs(step['price'])
         wait = wait + abs(step['wait'])
-        modes.append(step['vehicle_type'] if step['travel_mode'] in ['TRANSIT', 'TAXI'] else step['travel_mode'])
+        modes.append((step['vehicle_type'] if step['travel_mode'].lower() in ['transit', 'taxi'] else step['travel_mode']).lower())
         
-        if step['travel_mode'] == 'WALKING':
+        if step['travel_mode'].lower() == 'walking':
             walking_distance = walking_distance + abs(step['distance'])
 
         if 'congested_time' in step.keys():
-            congested_time = congested_time + abs(step['congested_time'])
+            congested_time = congested_time + abs(int(step['congested_time']))
         
-        perceived_duration = perceived_duration + abs(Model.perceived_time(i, step))
+        perceived_duration = perceived_duration + abs(Model.generalized_time(i, step))
 
     return {
         'traversed_distance': traversed_distance,
         'duration': duration,
-        'perceived_duration': perceived_duration,
+        'perceived_duration': int(perceived_duration),
         'cost': cost,
         'walking_distance': walking_distance,
         'modes': modes,
