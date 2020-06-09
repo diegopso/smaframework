@@ -11,7 +11,7 @@ config = {
     'url': '--',
     'download_url': '--',
     'author_email': 'diego@lrc.ic.unicamp.br',
-    'install_requires': ['pandas', 'numpy', 'scipy', 'scikit-learn', 'geopy', 'matplotlib', 'tweepy', 'pyproj', 'shapely', 'pyclustering', 'image', 'dask', 'fiona', 'haversine', 'hdbscan']
+    'install_requires': ['pandas', 'numpy', 'scipy', 'scikit-learn', 'geopy', 'matplotlib', 'tweepy', 'pyproj', 'shapely', 'pyclustering', 'image', 'dask', 'fiona', 'haversine', 'Cython', 'hdbscan', 'xmltodict', 'networkx', 'xmltodict', 'pytz']
 }
 
 setup(**config)

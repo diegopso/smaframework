@@ -8,6 +8,7 @@ import sklearn, json
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from scipy.signal import argrelextrema
+from scipy.optimize import curve_fit
 import os
 
 def cluster_hdbscan(filename, origin_columns, destination_columns, **kwargs):
@@ -194,33 +195,64 @@ def get_region(df, columns):
     df = '{"lat": '+ df['lat'].map(str) +', "lng": '+ df['lon'].map(str) +', "teta": '+ df['teta'].map(str) +'}'
     return '[' + df.str.cat(sep=',') + ']'
 
+def _interpolate_polynomial(y):
+    '''
+     * Smoth the data to a polynomial curve.
+    '''
+    N = len(y)
+    x = np.linspace(0, 1, N)
+
+    polynomial_features= PolynomialFeatures(degree=13)
+    x = polynomial_features.fit_transform(x.reshape(-1, 1))
+
+    model = LinearRegression()
+    model.fit(x, y)
+    return model.predict(x)
+
+def _interpolate_exponential(y):
+    '''
+     * Smooth data to inverse curve: y = alpha / x^beta
+    '''
+    N = len(y)
+    x0 = 0
+    x1 = int(.05 * N)
+    y0 = y[x0]
+    y1 = y[x1]
+    alpha = np.log(y1/y0) / x1
+
+    x = np.linspace(0, N, N)
+    return y0 * np.exp(x * alpha)
+
+def _interpolate_generic(y):
+    '''
+     * Use Scipy to estimate the curve.
+    '''
+    maximum = np.max(y)
+    y = y / maximum
+
+    N = len(y)
+
+    # make an estimate for the initial params
+    x0 = 0
+    x1 = int(.05 * N)
+    y0 = y[x0]
+    y1 = y[x1]
+    alpha = np.log(y1/y0) / x1
+
+    x = np.linspace(0, N, N)
+    (coeff, c2) = curve_fit(lambda t, a, b: a*np.exp(b*t), x, y, p0=(y0, alpha), check_finite=False)
+
+    return maximum * coeff[0] * np.exp(x * coeff[1])
+
 def _interpolate(y, interpolator='polynomial'):
     if interpolator == 'polynomial':
-        # smooth data to polynomial curve
-        N = len(y)
-        x = np.linspace(0, 1, N)
-
-        polynomial_features= PolynomialFeatures(degree=13)
-        x = polynomial_features.fit_transform(x.reshape(-1, 1))
-
-        model = LinearRegression()
-        model.fit(x, y)
-        ys = model.predict(x)
+        return _interpolate_polynomial(y)
     elif interpolator == 'exponential':
-        # smooth data to inverse curve: y = alpha / x^beta
-        N = len(y)
-        x0 = 0
-        x1 = int(.05 * N)
-        y0 = y[x0]
-        y1 = y[x1]
-        alpha = np.log(y1/y0) / x1
-
-        x = np.linspace(0, N, N)
-        ys = y0 * np.exp(x * alpha)
-    else:
-        ys = y
-
-    return ys
+        return _interpolate_exponential(y)
+    elif interpolator == 'generic':
+        return _interpolate_generic(y)
+    
+    return y
 
 def select_knee(y, plot2=False, interpolator='polynomial'):
     try:
